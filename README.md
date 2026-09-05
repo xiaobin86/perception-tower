@@ -2,6 +2,24 @@
 
 基于 ROS2 Humble 的感知塔控制与转盘扫描拼合包。
 
+## 架构
+
+```
+Ubuntu 机器（传感器）          macOS/任意机器（本包）
+┌─────────────────────┐      ┌──────────────────────────────┐
+│ rslidar_sdk         │──┐   │  perception_tower            │
+│   → /fairy/points   │  │   │    ┌─ FairyBuffer (订阅)     │
+│                     │  └──►│    ├─ CameraGrabber (订阅)    │
+│ orbbec_camera       │──┐   │    ├─ ServoClient  (串口)     │
+│   → /camera/color   │  └──►│    ├─ TowerFSM    (状态机)    │
+│   → /camera/depth   │      │    └─ Stitcher     (拼合)     │
+└─────────────────────┘      └──────────────────────────────┘
+       DDS 发现（同局域网自动发现）
+```
+
+传感器驱动安装在 Ubuntu 机器上，本包通过 ROS2 DDS 订阅远程 topic 获取数据。
+只需两台机器在同一局域网，设置相同的 `ROS_DOMAIN_ID` 即可。
+
 ## 功能
 
 - 提供 `/perception_tower/command` 服务，支持两条指令：
@@ -13,7 +31,7 @@
   - `/perception_tower/photo_color`、`/perception_tower/photo_depth`：90° 照片
 - 支持 `mock_hardware:=true` 无硬件跑通全流程。
 
-## 依赖安装（空机器 / macOS conda）
+## 依赖安装（macOS conda）
 
 ```bash
 conda create -n tower -c robostack-humble -c conda-forge --override-channels \
@@ -21,9 +39,7 @@ conda create -n tower -c robostack-humble -c conda-forge --override-channels \
   ros-humble-rosidl-default-generators ros-humble-ament-cmake-python \
   colcon-common-extensions pytest numpy pyserial opencv c-compiler cxx-compiler
 conda activate tower
-# 修复 empy 版本兼容性（rosidl 需要 3.x）
 pip install empy==3.3.4
-# macOS 上 cmake 需要用 conda 环境的版本（避免 homebrew 的旧版 cmake）
 export PATH="$CONDA_PREFIX/bin:$PATH"
 ```
 
@@ -33,18 +49,16 @@ export PATH="$CONDA_PREFIX/bin:$PATH"
 cd /Users/acelan/workspace/perception_tower
 source /opt/ros/humble/setup.bash  # Linux 生产机
 conda activate tower               # macOS 开发机
-export PATH="$CONDA_PREFIX/bin:$PATH"  # macOS 确保用 conda cmake
+export PATH="$CONDA_PREFIX/bin:$PATH"
 colcon build --symlink-install --cmake-args -DPython_EXECUTABLE=$(which python)
 source install/setup.bash
 ```
 
-## 传感器驱动安装
+## 传感器驱动安装（Ubuntu 机器）
 
-> **注意**：两个驱动都是 Linux C++ ROS2 包（rslidar_sdk 使用 Linux 专有 `recvmmsg` API，orbbec_camera 依赖 libusb），**只能在 Linux 生产机上编译安装**，macOS 开发机不支持。macOS 上请使用 `mock_hardware:=true` 模式。
+在 Ubuntu 机器上安装驱动，让它发布 ROS2 topic。
 
 ### RoboSense Fairy LiDAR
-
-在 **Linux 生产机**上安装 [rslidar_sdk](https://github.com/RoboSense-LiDAR/rslidar_sdk)（≥v1.5.19，支持 RSFAIRY，ROS2 Humble）：
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -56,24 +70,22 @@ colcon build --packages-select rslidar_msg rslidar_sdk
 source install/setup.bash
 ```
 
-关键配置（在 rslidar_sdk 的 yaml 中）：
+rslidar_sdk 配置（yaml）：
 ```yaml
 common:
-  msg_source: 1                  # 1=点云来自真实雷达
+  msg_source: 1
   send_point_cloud_ros: true
 lidar:
   - driver:
-      lidar_type: RSFAIRY        # Fairy 型号
+      lidar_type: RSFAIRY
     ros:
       ros_frame_id: lidar_link
       ros_send_point_cloud_topic: /fairy/points
 ```
 
-**重要**：确保 `timestamp_type` 为 `host` 时间基准（逐点补偿依赖此配置）。
+确保 `timestamp_type` 为 `host`（逐点补偿依赖此配置）。
 
 ### Orbbec Gemini 336L
-
-在 **Linux 生产机**上安装 [OrbbecSDK_ROS2](https://github.com/orbbec/OrbbecSDK_ROS2)（`v2-main` 分支）：
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -85,24 +97,45 @@ colcon build --packages-select orbbec_camera orbbec_description
 source install/setup.bash
 ```
 
-启动相机驱动：
+启动：
 ```bash
 ros2 launch orbbec_camera gemini_330_series.launch.py
 ```
 
 输出话题：
-- `/camera/color/image_raw`（1280×720@30，sensor_msgs/Image）
-- `/camera/depth/image_raw`（848×480@30，sensor_msgs/Image）
+- `/camera/color/image_raw`（1280×720@30）
+- `/camera/depth/image_raw`（848×480@30）
+
+### 一键安装脚本
+
+```bash
+bash scripts/setup_ubuntu_sensors.sh
+```
+
+## 局域网配置
+
+两台机器在同一局域网，设置相同 domain ID：
+
+```bash
+# 两台机器都执行
+export ROS_DOMAIN_ID=0
+export ROS_LOCALHOST_ONLY=0
+```
+
+验证发现：
+```bash
+# 在 macOS 上查看远程 topic
+ros2 topic list
+# 应能看到 /fairy/points, /camera/color/image_raw, /camera/depth/image_raw
+```
 
 ## 使用
 
 ### 硬件准备
 
-1. 确认步进电机转盘的 USB 串口已接入：
-   - Linux：`/dev/ttyUSB0`
-   - macOS：`/dev/tty.usbserial-*`
-2. 启动 Fairy 驱动（rslidar_sdk，配置 `timestamp_type` 为 host 时间基准）。
-3. 启动 Orbbec Gemini 336L 驱动（参考 `pallet_vision_lidar/launch/gemini_336l_custom.launch.py`）。
+1. 确认步进电机转盘的 USB 串口已接入（macOS: `/dev/tty.usbserial-*`，Linux: `/dev/ttyUSB0`）
+2. Ubuntu 机器启动 Fairy 驱动 + Orbbec 相机驱动
+3. 两台机器在同一局域网，`ROS_DOMAIN_ID` 一致
 
 ### 启动本节点
 
@@ -120,44 +153,11 @@ ros2 service call /perception_tower/command perception_tower_interfaces/srv/Towe
 ros2 service call /perception_tower/command perception_tower_interfaces/srv/TowerCommand "{command: 2}"
 ```
 
-调用返回 `accepted=true` 表示已受理；通过状态 topic 查看进度：
-
-```bash
-ros2 topic echo /perception_tower/status
-```
-
 ### Mock 模式（无硬件）
 
 ```bash
 ros2 launch perception_tower tower.launch.py mock_hardware:=true
-ros2 service call /perception_tower/command perception_tower_interfaces/srv/TowerCommand "{command: 1}"
-ros2 service call /perception_tower/command perception_tower_interfaces/srv/TowerCommand "{command: 2}"
 ```
-
-### macOS 原生桥接（无 rslidar_sdk / orbbec_camera）
-
-macOS 无法编译 Linux 专有驱动，本包提供两个纯 Python 桥接节点：
-
-**Fairy LiDAR UDP 桥接** — 直接接收 Fairy MSOP UDP 包，发布 PointCloud2：
-```bash
-# 启动桥接（监听 UDP 6699 端口）
-ros2 run perception_tower fairy_udp_bridge
-
-# 或在 launch 中同时启动
-ros2 launch perception_tower tower.launch.py use_fairy_bridge:=true
-```
-
-**Orbbec 相机桥接** — 需要 `pyorbbecsdk`（ARM64 macOS）或 `opencv-python`（fallback）：
-```bash
-# ARM64 macOS（pip install pyorbbecsdk）
-ros2 run perception_tower orbbec_bridge
-
-# x86_64 macOS（自动 fallback 到 OpenCV）
-pip install opencv-python
-ros2 run perception_tower orbbec_bridge
-```
-
-> **注意**：pyorbbecsdk 的 x86_64 轮子有打包 bug（.so 是 arm64），x86_64 macOS 只能用 OpenCV fallback（无深度数据）。完整 Orbbec 支持需要 ARM64 macOS 或从源码编译 OrbbecSDK_v2。
 
 ## 输出目录
 
@@ -175,3 +175,4 @@ ros2 run perception_tower orbbec_bridge
 - `mount_rpy_deg` / `mount_offset_xyz`：LiDAR 横装外参与偏心距
 - `voxel_leaf_m`：体素下采样叶节点大小（0 关闭）
 - `fairy_time_field`：是否启用逐点时间补偿
+- `fairy_topic` / `color_topic` / `depth_topic`：远程传感器 topic 名
