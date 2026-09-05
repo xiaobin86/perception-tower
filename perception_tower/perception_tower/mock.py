@@ -1,20 +1,18 @@
-"""Mock hardware for ``mock_hardware:=true`` and offline integration tests.
+"""Mock hardware for mock_hardware:=true and offline tests.
 
-FakeServo simulates the turntable firmware with a linear speed model. MockFairy
-/ MockCamera are rclpy publishers that emit synthetic sensor data in mock mode
-so the full INIT -> SCAN pipeline can run without real drivers.
+FakeServo simulates the turntable firmware with a linear speed model.
+MockTurntableService wraps FakeServo as a ROS2 service + publisher.
+MockFairy / MockCamera emit synthetic sensor data.
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from typing import List, Optional
 
 import numpy as np
 
 from .geometry import mount_rotation
-from .servo_client import poll_until_reached, ServoError
 
 
 class FakeServo:
@@ -70,29 +68,76 @@ class FakeServo:
     def deg_to_pos(self, deg: float) -> int:
         return int(round(self._origin + deg / self._dpp))
 
-    def poll_until_reached(self, pos_target, tol_deg, stable_count=5, timeout_s=30.0, poll_hz=100.0, progress_cb=None):
-        return poll_until_reached(
-            self.read_position,
-            self.pos_to_deg,
-            pos_target,
-            tol_deg,
-            stable_count,
-            timeout_s,
-            poll_hz,
-            progress_cb,
-        )
-
 
 try:
     from builtin_interfaces.msg import Time
     from sensor_msgs.msg import Image, PointCloud2
-
+    from perception_tower_sensor_interfaces.msg import TurntableStatus
+    from perception_tower_sensor_interfaces.srv import TurntableCommand
     _ROS_AVAILABLE = True
 except Exception:  # pragma: no cover
     _ROS_AVAILABLE = False
 
 
 if _ROS_AVAILABLE:
+
+    class MockTurntableService:
+        def __init__(self, node, servo, origin, deg_per_pos):
+            self._node = node
+            self._servo = servo
+            self._origin = origin
+            self._dpp = deg_per_pos
+
+            from rclpy.qos import QoSProfile, ReliabilityPolicy
+            qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+            self._pub = node.create_publisher(TurntableStatus, "/turntable/status", qos)
+            self._srv = node.create_service(TurntableCommand, "/turntable/command", self._on_command)
+            self._timer = node.create_timer(0.02, self._publish_status)  # 50 Hz
+
+        def _publish_status(self):
+            msg = TurntableStatus()
+            pos = self._servo.read_position()
+            msg.position = float(pos)
+            msg.angle_deg = self._servo.pos_to_deg(pos)
+            msg.state = TurntableStatus.STATE_IDLE
+            self._pub.publish(msg)
+
+        def _on_command(self, request, response):
+            cmd = request.command
+            if cmd == TurntableCommand.Request.CMD_HOME:
+                self._servo.reset()
+                target_deg = request.target_deg if request.target_deg else 90.0
+                target = self._servo.deg_to_pos(target_deg)
+                time_ms = max(200, int(abs(target_deg) / 40.0 * 1000))
+                self._servo.move_to(target, time_ms)
+                response.success = True
+                response.message = "homed"
+            elif cmd == TurntableCommand.Request.CMD_MOVE:
+                pos = self._servo.deg_to_pos(request.target_deg)
+                time_ms = max(200, int(request.duration_s * 1000)) if request.duration_s > 0 else 2000
+                self._servo.move_to(pos, time_ms)
+                response.success = True
+                response.message = f"moving to {request.target_deg:.1f}"
+            elif cmd == TurntableCommand.Request.CMD_STOP:
+                self._servo.stop()
+                response.success = True
+                response.message = "stopped"
+            else:
+                response.success = False
+                response.message = f"unknown command {cmd}"
+            return response
+
+        def command_fn(self, command, target_deg, duration_s):
+            req = TurntableCommand.Request()
+            req.command = command
+            req.target_deg = target_deg
+            req.duration_s = duration_s
+            resp = TurntableCommand.Response()
+            self._on_command(req, resp)
+            return resp.success, resp.message
+
+        def read_position(self):
+            return self._servo.read_position()
 
     class MockFairy:
         def __init__(self, node, topic: str, servo, period: float = 0.1):
@@ -110,8 +155,6 @@ if _ROS_AVAILABLE:
             return np.stack([xx.ravel(), yy.ravel(), zz.ravel()], axis=1).astype(np.float32)
 
         def _publish(self):
-            from .geometry import rotation_z_deg
-
             now = self._node.get_clock().now()
             theta_deg = self._servo.pos_to_deg(self._servo.read_position())
             world = self._scene_world()
@@ -127,7 +170,6 @@ if _ROS_AVAILABLE:
             n = lidar.shape[0]
             point_time = np.linspace(0.0, self._period, n, dtype=np.float64)
             from .pc2_utils import make_cloud_msg
-
             msg = make_cloud_msg(lidar, None, "lidar_link", now.to_msg(), point_time=point_time)
             self._pub.publish(msg)
             self._seq += 1

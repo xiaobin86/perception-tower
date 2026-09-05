@@ -1,8 +1,12 @@
-"""Tower state machine (INIT / SCAN) — Task 10.
+"""Tower state machine (INIT / SCAN).
 
-Runs the servo + angle-logger + Fairy buffer + camera pipeline. Free of rclpy
-so it can be exercised by plain pytest with mock hardware. Status / result
-events are surfaced through callbacks the node wires to ROS publishers.
+Runs the turntable + angle-logger + Fairy buffer + camera pipeline.
+Free of rclpy so it can be exercised by plain pytest with mock hardware.
+
+The turntable is controlled via a command callback:
+    turntable_cmd(command, target_deg, duration_s) -> (success, message)
+
+Position is read via read_position() -> int (raw pos value).
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 
@@ -39,9 +43,13 @@ class SaveConfig:
 class TowerFSM:
     def __init__(
         self,
-        servo,
+        turntable_cmd: Callable[[int, float, float], Tuple[bool, str]],
+        read_position: Callable[[], int],
+        pos_to_deg: Callable[[int], float],
+        deg_to_pos: Callable[[float], int],
         camera,
         fairy_buffer,
+        angle_logger,
         stitch_params: StitchParams,
         save_cfg: dict,
         status_cb: Callable[["State", int, str], None],
@@ -51,9 +59,13 @@ class TowerFSM:
         log_cb: Callable[[str], None] = print,
         config: Optional[dict] = None,
     ):
-        self._servo = servo
+        self._cmd = turntable_cmd
+        self._read_pos = read_position
+        self._pos_to_deg = pos_to_deg
+        self._deg_to_pos = deg_to_pos
         self._camera = camera
         self._fairy_buffer = fairy_buffer
+        self._angle_logger = angle_logger
         self._stitch_params = stitch_params
         self._save_cfg = SaveConfig(**save_cfg)
         self._status_cb = status_cb
@@ -100,54 +112,75 @@ class TowerFSM:
         self._thread.start()
         return True, "scan started"
 
-    def _move_to_deg(self, deg: float, speed_deg_s: float, progress_base: int, progress_span: int, label: str):
-        pos = self._servo.deg_to_pos(deg)
-        current_deg = self._servo.pos_to_deg(self._servo.read_position())
+    def _move_to_deg(self, deg: float, speed_deg_s: float,
+                     progress_base: int, progress_span: int, label: str):
+        pos = self._deg_to_pos(deg)
+        current_pos = self._read_pos()
+        current_deg = self._pos_to_deg(current_pos)
         delta = abs(deg - current_deg)
-        time_ms = max(200, int(delta / speed_deg_s * 1000))
-        self._servo.move_to(pos, time_ms)
+        time_s = max(0.2, delta / speed_deg_s)
+        self._cmd(2, deg, time_s)  # CMD_MOVE = 2
 
-        def cb(pct):
-            self._set_state(self._state, int(progress_base + pct * progress_span), label)
+        tol_deg = self._cfg.get("pos_tol_deg", 0.1)
+        stable_count = self._cfg.get("pos_stable_count", 5)
+        timeout_s = self._cfg.get("move_timeout_s", 30.0)
+        poll_hz = self._cfg.get("poll_hz", 100.0)
+        period = 1.0 / poll_hz
 
-        self._servo.poll_until_reached(
-            pos,
-            tol_deg=self._cfg.get("pos_tol_deg", 0.1),
-            stable_count=self._cfg.get("pos_stable_count", 5),
-            timeout_s=self._cfg.get("move_timeout_s", 30.0),
-            poll_hz=self._cfg.get("poll_hz", 100.0),
-            progress_cb=cb,
-        )
-        cb(1.0)
+        start_deg = current_deg
+        count = 0
+        start_t = time.monotonic()
+        n = 0
+        while True:
+            t0 = time.monotonic()
+            if t0 - start_t > timeout_s:
+                raise RuntimeError("position timeout")
+            pos = self._read_pos()
+            d = self._pos_to_deg(pos)
+            if abs(d - deg) <= tol_deg:
+                count += 1
+            else:
+                count = 0
+            n += 1
+            if n % 10 == 0:
+                total = abs(deg - start_deg)
+                remain = max(0.0, abs(deg - d))
+                pct = 0.0 if total <= 0 else 1.0 - remain / total
+                self._set_state(self._state,
+                                int(progress_base + min(0.999, pct) * progress_span), label)
+            if count >= stable_count:
+                self._set_state(self._state, int(progress_base + progress_span), label)
+                return
+            elapsed = time.monotonic() - t0
+            if elapsed < period:
+                time.sleep(period - elapsed)
 
     def _run_init(self):
         try:
             self._set_state(State.INITING, 0, "homing")
-            self._servo.reset(timeout_s=self._cfg.get("home_timeout_s", 30.0))
+            self._cmd(1, 0.0, 0.0)  # CMD_HOME = 1
+            time.sleep(0.5)
             self._set_state(State.INITING, 50, "moving to ready")
             self._move_to_deg(
                 self._cfg.get("ready_deg", 90.0),
                 self._cfg.get("sweep_speed_deg_s", 40.0),
-                50,
-                50,
-                "moving to ready",
+                50, 50, "moving to ready",
             )
             self._set_state(State.READY, 100, "ready")
         except Exception as exc:  # noqa: BLE001
             self._set_state(State.ERROR, 0, f"init failed: {exc}")
 
     def _ensure_ready(self):
-        pos = self._servo.read_position()
-        deg = self._servo.pos_to_deg(pos)
+        pos = self._read_pos()
+        deg = self._pos_to_deg(pos)
         if abs(deg - self._cfg.get("ready_deg", 90.0)) > self._cfg.get("pos_tol_deg", 0.1):
             self._set_state(State.SCANNING, 0, "re-homing")
-            self._servo.reset(timeout_s=self._cfg.get("home_timeout_s", 30.0))
+            self._cmd(1, 0.0, 0.0)  # CMD_HOME
+            time.sleep(0.5)
             self._move_to_deg(
                 self._cfg.get("ready_deg", 90.0),
                 self._cfg.get("sweep_speed_deg_s", 40.0),
-                0,
-                10,
-                "re-homing",
+                0, 10, "re-homing",
             )
 
     def _run_scan(self):
@@ -166,31 +199,20 @@ class TowerFSM:
                 self._log("camera not available, skipping photo")
 
             self._set_state(State.SCANNING, 20, "move to scan start")
-            from .angle_logger import AngleLogger
-
-            logger = AngleLogger(
-                self._servo.read_position,
-                self._clock,
-                self._servo.pos_to_deg,
-                poll_hz=self._cfg.get("poll_hz", 100.0),
-            )
-            self._fairy_buffer.start()
+            logger = self._angle_logger
             logger.start()
+            self._fairy_buffer.start()
             self._move_to_deg(
                 self._cfg.get("scan_start_deg", 30.0),
                 self._cfg.get("sweep_speed_deg_s", 40.0),
-                20,
-                10,
-                "move to start",
+                20, 10, "move to start",
             )
 
             self._set_state(State.SCANNING, 30, "sweep")
             self._move_to_deg(
                 self._cfg.get("scan_end_deg", 150.0),
                 self._cfg.get("sweep_speed_deg_s", 40.0),
-                30,
-                40,
-                "sweeping",
+                30, 40, "sweeping",
             )
             time.sleep(self._cfg.get("move_settle_s", 0.2))
             logger.stop()
@@ -216,16 +238,13 @@ class TowerFSM:
             self._cloud_cb(result.xyz, result.intensity, stamp)
             if self._save_cfg.save_cloud:
                 from .pc2_utils import save_pcd_binary
-
                 save_pcd_binary(os.path.join(out_dir, "stitched.pcd"), result.xyz, result.intensity)
 
             self._set_state(State.PROCESSING, 95, "return to ready")
             self._move_to_deg(
                 self._cfg.get("ready_deg", 90.0),
                 self._cfg.get("sweep_speed_deg_s", 40.0),
-                95,
-                5,
-                "return to ready",
+                95, 5, "return to ready",
             )
             self._set_state(State.READY, 100, f"scan done: {out_dir}")
         except Exception as exc:  # noqa: BLE001

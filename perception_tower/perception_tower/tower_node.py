@@ -1,19 +1,19 @@
-"""perception_tower ROS2 node (Task 11).
+"""perception_tower ROS2 node.
 
-Wires the :class:`TowerFSM` to ROS interfaces:
-  * service  ``/perception_tower/command``  (TowerCommand)
-  * status   ``/perception_tower/status``    (TowerStatus, reliable+transient_local)
-  * topics   ``<stitched_topic>`` / ``<photo_color_topic>`` / ``<photo_depth_topic>``
+Wires the TowerFSM to ROS interfaces:
+  * service  /perception_tower/command  (TowerCommand)
+  * status   /perception_tower/status   (TowerStatus, reliable+transient_local)
+  * topics   stitched / photo_color / photo_depth
 
-In real mode the Fairy / 336L subscriptions feed the buffers and the real
-serial servo is used. In ``mock_hardware:=true`` the buffers are fed by the
-same subscriptions but the data is produced by ``MockFairy`` / ``MockCamera``
-publishers, and a ``FakeServo`` replaces the serial client.
+Subscribes to /turntable/status (from sensor_env turntable_node)
+and calls /turntable/command service for turntable control.
+In mock mode, FakeServo + MockTurntableService replace the remote node.
 """
 
 from __future__ import annotations
 
 import os
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -24,7 +24,6 @@ from .camera_grabber import CameraGrabber, PhotoPair
 from .fairy_buffer import FairyBuffer
 from .fsm import State, TowerFSM
 from .pc2_utils import make_cloud_msg
-from .servo_client import ServoClient
 from .stitcher import StitchParams
 
 try:
@@ -32,10 +31,13 @@ try:
     from sensor_msgs.msg import Image, PointCloud2
     from perception_tower_interfaces.msg import TowerStatus
     from perception_tower_interfaces.srv import TowerCommand
+    from perception_tower_sensor_interfaces.msg import TurntableStatus
+    from perception_tower_sensor_interfaces.srv import TurntableCommand
 
     _ROS_AVAILABLE = True
-except Exception:  # pragma: no cover - only when built
+except Exception:  # pragma: no cover
     Time = Image = PointCloud2 = TowerStatus = TowerCommand = None
+    TurntableStatus = TurntableCommand = None
     _ROS_AVAILABLE = False
 
 
@@ -59,13 +61,13 @@ class TowerNode(Node):
         self._status_timer = self.create_timer(0.5, self._publish_status)
         self._last_status = (State.IDLE, 0, "initialized")
 
+        self._angle_logger = AngleLogger()
         self._build_components()
 
     def _declare_params(self):
         p = [
-            ("serial_port", ""),
-            ("serial_baud", 115200),
-            ("poll_hz", 100.0),
+            ("turntable_cmd_service", "/turntable/command"),
+            ("turntable_status_topic", "/turntable/status"),
             ("pos_tol_deg", 0.1),
             ("pos_stable_count", 5),
             ("pos_origin", 500),
@@ -76,6 +78,7 @@ class TowerNode(Node):
             ("scan_end_deg", 150.0),
             ("sweep_speed_deg_s", 40.0),
             ("home_timeout_s", 30.0),
+            ("poll_hz", 100.0),
             ("fairy_topic", "/rslidar_points"),
             ("fairy_time_field", True),
             ("mount_rpy_deg", [90.0, 0.0, 0.0]),
@@ -104,6 +107,8 @@ class TowerNode(Node):
         self._mock = self.get_parameter("mock_hardware").value
         self._world_frame_id = self.get_parameter("world_frame_id").value
         self._output_dir = self.get_parameter("output_dir").value
+        self._origin = self.get_parameter("pos_origin").value
+        self._dpp = self.get_parameter("deg_per_pos").value
 
     def _build_components(self):
         cfg = {
@@ -119,56 +124,41 @@ class TowerNode(Node):
             "move_settle_s": self.get_parameter("move_settle_s").value,
             "move_timeout_s": self.get_parameter("move_timeout_s").value,
         }
-        origin = self.get_parameter("pos_origin").value
-        dpp = self.get_parameter("deg_per_pos").value
-        angle_sign = self.get_parameter("angle_sign").value
+
+        pos_to_deg = lambda pos: (pos - self._origin) * self._dpp
+        deg_to_pos = lambda deg: int(round(self._origin + deg / self._dpp))
 
         if self._mock:
-            from .mock import FakeServo
-
-            servo = FakeServo(origin=origin, deg_per_pos=dpp, speed_deg_s=cfg["sweep_speed_deg_s"])
+            from .mock import FakeServo, MockTurntableService
+            servo = FakeServo(origin=self._origin, deg_per_pos=self._dpp,
+                              speed_deg_s=cfg["sweep_speed_deg_s"])
+            self._mock_tt = MockTurntableService(self, servo, self._origin, self._dpp)
+            turntable_cmd = self._mock_tt.command_fn
+            read_position = self._mock_tt.read_position
         else:
-            servo = ServoClient(
-                port=self.get_parameter("serial_port").value,
-                baud=self.get_parameter("serial_baud").value,
-                pos_origin=origin,
-                deg_per_pos=dpp,
-            )
-            try:
-                servo.open()
-            except Exception as exc:
-                self.get_logger().error(f"failed to open servo: {exc}")
+            turntable_cmd = self._create_turntable_client()
+            self.create_subscription(
+                TurntableStatus,
+                self.get_parameter("turntable_status_topic").value,
+                self._on_turntable_status, 10)
+            read_position = self._read_position_from_logger
 
         camera = CameraGrabber(now_fn=lambda: self.get_clock().now().nanoseconds * 1e-9)
-        # Always subscribe so the buffers are fed (in mock mode the data is
-        # produced by MockCamera / MockFairy below).
         self.create_subscription(
-            Image,
-            self.get_parameter("color_topic").value,
-            camera.on_color,
-            10,
-        )
+            Image, self.get_parameter("color_topic").value, camera.on_color, 10)
         self.create_subscription(
-            Image,
-            self.get_parameter("depth_topic").value,
-            camera.on_depth,
-            10,
-        )
+            Image, self.get_parameter("depth_topic").value, camera.on_depth, 10)
         if self._mock:
             from .mock import MockCamera
-
-            MockCamera(self, self.get_parameter("color_topic").value, self.get_parameter("depth_topic").value)
+            MockCamera(self, self.get_parameter("color_topic").value,
+                       self.get_parameter("depth_topic").value)
 
         fairy_buffer = FairyBuffer(use_time_field=self.get_parameter("fairy_time_field").value)
         self.create_subscription(
-            PointCloud2,
-            self.get_parameter("fairy_topic").value,
-            lambda msg: fairy_buffer.on_cloud(msg, self.get_clock().now().nanoseconds * 1e-9),
-            10,
-        )
+            PointCloud2, self.get_parameter("fairy_topic").value,
+            lambda msg: fairy_buffer.on_cloud(msg, self.get_clock().now().nanoseconds * 1e-9), 10)
         if self._mock:
             from .mock import MockFairy
-
             MockFairy(self, self.get_parameter("fairy_topic").value, servo)
 
         stitch_params = StitchParams(
@@ -178,18 +168,20 @@ class TowerNode(Node):
             scan_end_deg=cfg["scan_end_deg"],
             voxel_leaf_m=self.get_parameter("voxel_leaf_m").value,
             per_point_time=self.get_parameter("fairy_time_field").value,
-            angle_sign=angle_sign,
+            angle_sign=self.get_parameter("angle_sign").value,
         )
 
         self._fsm = TowerFSM(
-            servo=servo,
+            turntable_cmd=turntable_cmd,
+            read_position=read_position,
+            pos_to_deg=pos_to_deg,
+            deg_to_pos=deg_to_pos,
             camera=camera,
             fairy_buffer=fairy_buffer,
+            angle_logger=self._angle_logger,
             stitch_params=stitch_params,
-            save_cfg={
-                "output_dir": self._output_dir,
-                "save_cloud": self.get_parameter("save_cloud").value,
-            },
+            save_cfg={"output_dir": self._output_dir,
+                      "save_cloud": self.get_parameter("save_cloud").value},
             status_cb=self._on_fsm_status,
             photo_cb=self._on_photo,
             cloud_cb=self._on_cloud,
@@ -197,6 +189,34 @@ class TowerNode(Node):
             log_cb=lambda m: self.get_logger().info(m),
             config=cfg,
         )
+
+    def _on_turntable_status(self, msg: "TurntableStatus"):
+        ts = self.get_clock().now().nanoseconds * 1e-9
+        self._angle_logger.record_sample(ts, msg.angle_deg)
+
+    def _read_position_from_logger(self):
+        angle = self._angle_logger.last_angle()
+        if angle is None:
+            return self._origin
+        return int(round(self._origin + angle / self._dpp))
+
+    def _create_turntable_client(self):
+        svc_name = self.get_parameter("turntable_cmd_service").value
+        client = self.create_client(TurntableCommand, svc_name)
+        if not client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().warn(f"turntable service not available: {svc_name}")
+
+        def turntable_cmd(command, target_deg, duration_s):
+            req = TurntableCommand.Request()
+            req.command = command
+            req.target_deg = target_deg
+            req.duration_s = duration_s
+            future = client.call_async(req)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=30.0)
+            result = future.result()
+            return result.success, result.message
+
+        return turntable_cmd
 
     def _on_fsm_status(self, state: "State", progress: int, message: str):
         self._last_status = (state, progress, message)
@@ -232,7 +252,7 @@ class TowerNode(Node):
 
     def destroy_node(self):
         try:
-            self._fsm._servo.close()
+            self._angle_logger.stop()
         except Exception:
             pass
         super().destroy_node()
