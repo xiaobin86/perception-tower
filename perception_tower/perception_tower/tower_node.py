@@ -29,10 +29,8 @@ from .stitcher import StitchParams
 try:
     from builtin_interfaces.msg import Time
     from sensor_msgs.msg import Image, PointCloud2
-    from perception_tower_interfaces.msg import TowerStatus
-    from perception_tower_interfaces.srv import TowerCommand
-    from perception_tower_sensor_interfaces.msg import TurntableStatus
-    from perception_tower_sensor_interfaces.srv import TurntableCommand
+    from perception_tower_interfaces.msg import TowerStatus, TurntableStatus
+    from perception_tower_interfaces.srv import TowerCommand, TurntableCommand
 
     _ROS_AVAILABLE = True
 except Exception:  # pragma: no cover
