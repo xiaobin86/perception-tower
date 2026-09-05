@@ -5,16 +5,30 @@
 ## 架构
 
 ```
-Ubuntu 机器（传感器）              macOS/任意机器（本包）
-┌──────────────────────────┐      ┌──────────────────────────────┐
-│ rslidar_sdk              │──┐   │  perception_tower            │
-│   → /rslidar_points      │  │   │    ┌─ FairyBuffer (订阅)     │
-│                          │  └──►│    ├─ CameraGrabber (订阅)    │
-│ orbbec_camera            │──┐   │    ├─ ServoClient  (串口)     │
-│   → /camera/color/image_raw│ └──►│    ├─ TowerFSM    (状态机)    │
-│   → /camera/depth/image_raw│     │    └─ Stitcher     (拼合)     │
-└──────────────────────────┘      └──────────────────────────────┘
-        DDS 发现（同局域网）
+Ubuntu 机器（Docker: perception_tower_sensor_env）
+┌──────────────────────────────────────────────┐
+│  perception_tower 容器 (--network host)       │
+│  ┌─────────────────┐  ┌──────────────────┐  │
+│  │ rslidar_sdk      │  │ turntable_node   │  │
+│  │  → /rslidar_points│  │  → /turntable/status│
+│  │                  │  │  ← /turntable/command│
+│  │ orbbec_camera    │  │  (串口 → STM32)   │  │
+│  │  → /camera/*     │  └──────────────────┘  │
+│  └─────────────────┘                         │
+└───────────────────────│──────────────────────┘
+                        │ CycloneDDS
+                        ▼
+macOS 机器（本包）
+┌──────────────────────────────────────────────┐
+│  perception_tower                            │
+│    ├─ FairyBuffer   (订阅 /rslidar_points)   │
+│    ├─ CameraGrabber (订阅 /camera/*)         │
+│    ├─ TurntableCmd  (调用 /turntable/command) │
+│    ├─ AngleLogger   (订阅 /turntable/status)  │
+│    ├─ TowerFSM      (状态机)                  │
+│    ├─ Stitcher      (逐点时间补偿拼合)        │
+│    └─ TowerGUI      (tkinter 控制面板)        │
+└──────────────────────────────────────────────┘
 ```
 
 ## 功能
@@ -25,6 +39,7 @@ Ubuntu 机器（传感器）              macOS/任意机器（本包）
 - `/perception_tower/status`：实时状态（transient_local）
 - 输出：`/perception_tower/stitched_points`、`/perception_tower/photo_color`、`/perception_tower/photo_depth`
 - 支持 `mock_hardware:=true` 无硬件仿真
+- 支持 `gui:=true` tkinter 可视控制面板
 
 ---
 
@@ -91,11 +106,28 @@ colcon build --symlink-install --cmake-args -DPython_EXECUTABLE=$(which python)
 # Mock 模式（无需硬件/传感器，验证流程）
 ros2 launch perception_tower tower.launch.py mock_hardware:=true
 
-# 真实模式（需要串口舵机 + Ubuntu 传感器机器在同一局域网）
+# 真实模式（需要 Ubuntu 传感器机器在同一局域网）
 ros2 launch perception_tower tower.launch.py
+
+# 启动 GUI 控制面板
+ros2 launch perception_tower tower.launch.py gui:=true
+
+# Mock + GUI
+ros2 launch perception_tower tower.launch.py mock_hardware:=true gui:=true
 ```
 
-#### 1.6 调用服务
+#### 1.6 GUI 控制面板
+
+启动 `gui:=true` 后弹出 tkinter 窗口：
+
+- **CMD_INIT (Reset & Home)**：转盘回零 + 移到 90° 待命位置
+- **CMD_SCAN (Scan)**：拍照 → 30°~150° 扫描 → 点云拼合
+- **Status 区域**：实时显示状态（颜色编码）+ 进度条
+- **Log 区域**：深色主题滚动日志，带时间戳
+
+状态颜色：IDLE 灰 | INITING 黄 | READY 绿 | SCANNING 蓝 | PROCESSING 紫 | ERROR 红
+
+#### 1.7 命令行调用服务
 
 ```bash
 # 新终端
@@ -113,7 +145,7 @@ ros2 topic echo /perception_tower/status --no-daemon
 
 > **提示**：如果 `ros2` 命令卡住，先执行 `kill $(pgrep -f ros2_daemon) 2>/dev/null` 杀掉残留进程，或使用 `--no-daemon` 参数。
 
-#### 1.7 可视化（rviz2）
+#### 1.8 可视化（rviz2）
 
 ```bash
 conda activate tower
@@ -123,98 +155,72 @@ rviz2
 
 ---
 
-### 2. Ubuntu 传感器机
+### 2. Ubuntu 传感器机（Docker 部署）
 
-#### 2.1 安装 ROS2 Humble
+传感器驱动通过 Docker 容器部署，仓库：`git@github.com:xiaobin86/perception_tower_sensor_env.git`
+
+#### 2.1 克隆传感器环境仓库
 
 ```bash
-sudo apt update && sudo apt install -y software-properties-common
-sudo add-apt-repository universe
-sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
-  -o /usr/share/keyrings/ros-archive-keyring.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
-  http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | \
-  sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
-sudo apt update && sudo apt install -y ros-humble-ros-base python3-colcon-common-extensions
+git clone git@github.com:xiaobin86/perception_tower_sensor_env.git
+cd perception_tower_sensor_env
 ```
 
-#### 2.2 安装 Fairy LiDAR 驱动
+#### 2.2 构建 Docker 镜像
 
 ```bash
-source /opt/ros/humble/setup.bash
-mkdir -p ~/ros2_ws/src && cd ~/ros2_ws/src
-git clone https://github.com/RoboSense-LiDAR/rslidar_msg.git
-git clone -b v1.5.19 https://github.com/RoboSense-LiDAR/rslidar_sdk.git
-cd ~/ros2_ws
-colcon build --packages-select rslidar_msg rslidar_sdk
+docker compose -f docker/docker-compose.yml build
+```
+
+> 首次构建约 10-15 分钟（编译 Orbbec SDK + rslidar_sdk）。
+
+#### 2.3 启动容器
+
+```bash
+docker compose -f docker/docker-compose.yml up -d
+docker exec -it perception_tower bash
+```
+
+容器内环境已自动配置（`.bashrc`）：
+- `ROS_DOMAIN_ID=0`、`ROS_LOCALHOST_ONLY=0`
+- `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`
+- CycloneDDS peer 指向 macOS 机器 IP
+- 工作空间：`/opt/orbbec_ws`（相机）、`/opt/fairy_ws`（LiDAR）
+
+#### 2.4 构建 turntable 包
+
+```bash
+# 容器内
+cd /workspace
+colcon build --packages-select perception_tower_sensor_interfaces perception_tower_sensor
 source install/setup.bash
 ```
 
-rslidar_sdk 配置（编辑 `~/ros2_ws/src/rslidar_sdk/config/ros_rsfairy.yaml`）：
-```yaml
-common:
-  msg_source: 1
-  send_point_cloud_ros: true
-lidar:
-  - driver:
-      lidar_type: RSFAIRY
-      msop_port: 6699
-    ros:
-      ros_frame_id: lidar_link
-      ros_send_point_cloud_topic: /rslidar_points
-```
-
-确保 `timestamp_type` 为 `host`（逐点补偿依赖此配置）。
-
-启动：
-```bash
-source ~/ros2_ws/install/setup.bash
-ros2 launch rslidar_sdk std_RSFairY.launch.py
-```
-
-验证：
-```bash
-ros2 topic hz /rslidar_points  # 应看到 ~10Hz
-```
-
-#### 2.3 安装 Orbbec Gemini 336L 驱动
+#### 2.5 一键启动所有硬件
 
 ```bash
-source /opt/ros/humble/setup.bash
-cd ~/ros2_ws/src
-git clone -b v2-main https://github.com/orbbec/OrbbecSDK_ROS2.git
-cd OrbbecSDK_ROS2 && git submodule update --init --recursive
-cd ~/ros2_ws
-colcon build --packages-select orbbec_camera orbbec_description
-source install/setup.bash
+# 容器内 - 一键启动 LiDAR + 相机 + 转盘
+ros2 launch perception_tower_sensor sensor_env.launch.py
+
+# 指定转盘串口
+ros2 launch perception_tower_sensor sensor_env.launch.py turntable_port:=/dev/ttyUSB1
 ```
 
-启动：
-```bash
-ros2 launch orbbec_camera gemini_330_series.launch.py
-```
-
-输出话题：
-- `/camera/color/image_raw`（1280×720@30）
-- `/camera/depth/image_raw`（848×480@30）
-
-#### 2.4 配置 DDS 网络发现
+#### 2.6 验证话题发布
 
 ```bash
-# 加入容器内 ~/.bashrc（Docker 容器内必须设置，否则跨机 DDS 发现不通）
-export ROS_DOMAIN_ID=0
-export ROS_LOCALHOST_ONLY=0
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export CYCLONEDDS_URI='<CycloneDDS><Domain><Discovery><Peers><Peer address="macOS机器IP"/></Peers></Discovery></Domain></CycloneDDS>'
-source /opt/ros/humble/setup.bash
-```
+ros2 topic list
+# 应看到：
+#   /rslidar_points          (PointCloud2, ~10Hz)
+#   /camera/color/image_raw  (Image, ~30Hz)
+#   /camera/depth/image_raw  (Image, ~30Hz)
+#   /turntable/status        (TurntableStatus, ~50Hz)
 
-> **重要**：如果 ROS2 跑在 Docker 容器中（即使 `--network host`），容器内的传感器进程启动时必须带上 `CYCLONEDDS_URI`，否则远端机器无法发现 topic。最简单的做法是把上面的 export 写入容器的 `/root/.bashrc`。
+ros2 topic hz /turntable/status    # ~50Hz
+ros2 topic echo /turntable/status --no-daemon
 
-#### 2.5 一键安装脚本
-
-```bash
-bash scripts/setup_ubuntu_sensors.sh
+# 测试转盘命令
+ros2 service call /turntable/command perception_tower_sensor_interfaces/srv/TurntableCommand "{command: 1, target_deg: 90.0, duration_s: 0.0}"
 ```
 
 ---
@@ -222,6 +228,16 @@ bash scripts/setup_ubuntu_sensors.sh
 ### 3. 局域网通信配置
 
 两台机器必须在同一局域网，且 `ROS_DOMAIN_ID` 一致（默认 0）。
+
+```
+macOS (192.168.3.187)  ←── WiFi ──→  Ubuntu (192.168.3.162)
+                                          │
+                                     Docker 容器（--network host）
+                                          │
+                          ┌───────────────┴───────────────┐
+                     Fairy LiDAR        Orbbec 相机     转盘 STM32
+                   (Ethernet, UDP)      (USB 直通)     (USB 串口)
+```
 
 **DDS 发现不通时的排查：**
 
@@ -233,23 +249,19 @@ ping 192.168.x.x
 echo $ROS_DOMAIN_ID     # 两台都应为 0
 echo $ROS_LOCALHOST_ONLY # 两台都应为 0
 
-# 3. 确认 Ubuntu 端能看到自己的 topic
-ros2 topic list  # 应看到 /rslidar_points 等
+# 3. 确认 Ubuntu 容器内能看到自己的 topic
+ros2 topic list  # 应看到 /rslidar_points, /turntable/status 等
 
 # 4. macOS 端查看远端 topic
 ros2 topic list --no-daemon
 ```
 
-**如果 FastDDS 多播发现失败（macOS 常见），使用 CycloneDDS：**
+**如果 CycloneDDS 发现失败（macOS 常见）：**
 
 ```bash
-# 安装
-conda activate tower
-/Users/acelan/miniforge3/bin/mamba install -y -n tower -c conda-forge rmw_cyclonedds_cpp
-
-# 设置（加入 conda activate.d 或手动执行）
+# macOS 端设置（加入 conda activate.d 或手动执行）
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export CYCLONEDDS_URI='<CycloneDDS><Domain><General><NetworkInterfaceAddress>auto</NetworkInterfaceAddress><Peers><Peer address="Ubuntu机器IP"/></Peers></General></Domain></CycloneDDS>'
+export CYCLONEDDS_URI=file:///path/to/perception_tower/config/cyclone.xml
 
 # 重启 ros2 daemon
 kill $(pgrep -f ros2_daemon) 2>/dev/null
@@ -257,19 +269,38 @@ ros2 daemon start
 ros2 topic list --no-daemon
 ```
 
+> **注意**：CycloneDDS XML 配置必须放在文件中（`file://` URI），内联 XML 会因 shell 转义问题失败。配置文件见 `config/cyclone.xml`。
+
+---
+
+## ROS2 接口总览
+
+| 类型 | 名称 | 方向 | 说明 |
+|------|------|------|------|
+| **Service** | `/perception_tower/command` | 外部 → node | CMD_INIT / CMD_SCAN |
+| **Publisher** | `/perception_tower/status` | node → 外部 | FSM 状态 + 进度 |
+| **Publisher** | `/perception_tower/stitched_points` | node → 外部 | 拼合点云 |
+| **Publisher** | `/perception_tower/photo_color` | node → 外部 | 彩色照片 |
+| **Publisher** | `/perception_tower/photo_depth` | node → 外部 | 深度照片 |
+| **Subscriber** | `/turntable/status` | sensor_env → node | 转盘位置 (50Hz) |
+| **Service Client** | `/turntable/command` | node → sensor_env | 转盘控制 |
+
 ---
 
 ## 常见问题
 
 | 问题 | 解决 |
 |------|------|
-| `ros2 topic list` 看不到远端 topic | 确认两台 `ROS_DOMAIN_ID=0`、`ROS_LOCALHOST_ONLY=0`，ping 通。**如果传感器在 Docker 容器内，容器里的 DDS 进程也必须设 `CYCLONEDDS_URI` peer 指向远端机器，双向 peer 才能发现** |
+| `ros2 topic list` 看不到远端 topic | 确认两台 `ROS_DOMAIN_ID=0`、`ROS_LOCALHOST_ONLY=0`，ping 通。**容器内 DDS 也必须设 `CYCLONEDDS_URI` peer 指向远端机器** |
 | `ros2 topic list` 超时 | `kill $(pgrep -f ros2_daemon)` 或加 `--no-daemon` |
-| `Package 'perception_tower' not found` | 执行 `colcon build --symlink-install --cmake-args -DPython_EXECUTABLE=$(which python)` |
+| `Package 'perception_tower' not found` | 执行 `colcon build --cmake-args -DPython_EXECUTABLE=$(which python)`（不要用 `--symlink-install`） |
 | `source install/setup.bash` 报错 | 改用 `source install/local_setup.bash` 或不 source，conda 激活脚本已自动配置 |
 | `rviz2` 找不到 | `conda install -c robostack-humble -c conda-forge ros-humble-desktop` |
 | `ModuleNotFoundError: rclpy` | 确认 `conda activate tower`，不要用系统 Python |
 | `The passed service type is invalid` | 先 `ros2 daemon stop`，再 `ros2 service list --no-daemon` 确认服务存在 |
+| Docker 容器内 USB 设备不可见 | 确认 `docker-compose.yml` 中 `privileged: true` 且 `/dev:/dev` 已挂载 |
+| Orbbec 相机无图像输出 | 重启 orbbec_camera 节点；确认 SDK 版本为 v2.8.6（有 USB PAL 支持） |
+| 转盘串口连不上 | 确认 `turntable_port` 参数指向正确的 `/dev/ttyUSB*`，容器内 `ls /dev/ttyUSB*` 查看 |
 
 ## 输出目录
 
@@ -277,12 +308,12 @@ ros2 topic list --no-daemon
 - `color.png`：彩色图
 - `depth.png`：16-bit 深度图（毫米）
 - `stitched.pcd`：拼合点云
-- `angle_log.csv`：100Hz 转盘角度日志
+- `angle_log.csv`：50Hz 转盘角度日志
 
 ## 关键参数
 
 见 `config/tower_params.yaml`：
-- `serial_port` / `serial_baud`：转盘串口
+- `turntable_cmd_service` / `turntable_status_topic`：转盘 ROS2 接口名
 - `ready_deg` / `scan_start_deg` / `scan_end_deg` / `sweep_speed_deg_s`：扫描范围与速度
 - `mount_rpy_deg` / `mount_offset_xyz`：LiDAR 横装外参与偏心距
 - `voxel_leaf_m`：体素下采样叶节点大小（0 关闭）

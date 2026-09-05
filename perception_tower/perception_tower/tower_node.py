@@ -76,7 +76,7 @@ class TowerNode(Node):
             ("scan_end_deg", 150.0),
             ("sweep_speed_deg_s", 40.0),
             ("home_timeout_s", 30.0),
-            ("fairy_topic", "/fairy/points"),
+            ("fairy_topic", "/rslidar_points"),
             ("fairy_time_field", True),
             ("mount_rpy_deg", [90.0, 0.0, 0.0]),
             ("mount_offset_xyz", [0.0, 0.0, 0.0]),

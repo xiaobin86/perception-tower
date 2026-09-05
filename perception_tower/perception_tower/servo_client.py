@@ -160,11 +160,14 @@ class ServoClient:
         while self._running:
             try:
                 data = self._ser.read(256)
-            except Exception:
+            except Exception as exc:
+                print(f"[servo] _read_loop exception: {exc}", flush=True)
                 break
             if data:
-                for ev in self._parser.feed(data):
+                events = self._parser.feed(data)
+                for ev in events:
                     self._reply_q.put(ev)
+                print(f"[servo] rx {data!r} -> {events} (qsize={self._reply_q.qsize()})", flush=True)
 
     def _send(self, payload: bytes):
         with self._write_lock:
@@ -186,11 +189,15 @@ class ServoClient:
                 return ev
 
     def _flush_replies(self):
+        count = 0
         while True:
             try:
                 self._reply_q.get_nowait()
+                count += 1
             except queue.Empty:
                 break
+        if count:
+            print(f"[servo] flushed {count} stale events", flush=True)
 
     def move_to(self, pos: int, time_ms: int):
         self._send(f"#{self._servo_id:03d}P{pos}T{time_ms}!".encode())
@@ -202,7 +209,9 @@ class ServoClient:
     def read_position(self, timeout_s: float = 0.2) -> int:
         self._flush_replies()
         self._send(f"#{self._servo_id:03d}PRAD!".encode())
+        print(f"[servo] sent PRAD, waiting...", flush=True)
         ev = self._wait_event(("pos",), timeout_s)
+        print(f"[servo] got pos={ev[1]}", flush=True)
         return int(ev[1])
 
     def reset(self, timeout_s: float = 30.0):

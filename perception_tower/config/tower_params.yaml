@@ -16,7 +16,7 @@ tower_node:
     sweep_speed_deg_s: 40.0    # 扫描角速度（决定 MOVE 的 T 参数）
     home_timeout_s: 30.0       # RST 回零超时
     # Fairy 拼合
-    fairy_topic: /fairy/points
+    fairy_topic: /rslidar_points
     fairy_time_field: true     # 逐点补偿开关（依赖驱动每点 time）
     mount_rpy_deg: [90.0, 0.0, 0.0]
     mount_offset_xyz: [0.0, 0.0, 0.0]

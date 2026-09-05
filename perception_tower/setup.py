@@ -22,6 +22,7 @@ setup(
     entry_points={
         "console_scripts": [
             "tower_node = perception_tower.tower_node:main",
+            "tower_gui = perception_tower.tower_gui:main",
         ],
     },
 )

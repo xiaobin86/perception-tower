@@ -155,13 +155,15 @@ class TowerFSM:
             self._set_state(State.SCANNING, 0, "scan start")
             self._ensure_ready()
             self._set_state(State.SCANNING, 10, "capture photo")
-            pair = self._camera.capture(timeout_s=self._cfg.get("photo_timeout_s", 5.0))
             out_dir = os.path.join(self._save_cfg.output_dir, time.strftime("%Y%m%d_%H%M%S"))
             os.makedirs(out_dir, exist_ok=True)
-            from .camera_grabber import save_photos
-
-            save_photos(pair, out_dir)
-            self._photo_cb(pair)
+            try:
+                pair = self._camera.capture(timeout_s=self._cfg.get("photo_timeout_s", 5.0))
+                from .camera_grabber import save_photos
+                save_photos(pair, out_dir)
+                self._photo_cb(pair)
+            except RuntimeError:
+                self._log("camera not available, skipping photo")
 
             self._set_state(State.SCANNING, 20, "move to scan start")
             from .angle_logger import AngleLogger
