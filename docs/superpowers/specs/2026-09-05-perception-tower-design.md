@@ -148,7 +148,7 @@ state=SCANNING
 6. 到位后继续采集 200ms（余量），停止采集
    采集有效性检查：Fairy 帧数 >0 且角度日志覆盖扫描窗口，否则 ERROR
 state=PROCESSING
-7. 后台线程拼合（见 §5），完成后发布 stitched_points、可选存 PCD
+7. 后台线程拼合（见 §5），完成后发布 stitched_points、可选存 PCD。**输出目录内容**：`color.png`、`depth.png`、`stitched.pcd`（save_cloud=true 时）、`angle_log.csv`（100Hz 时间-原始角度日志，调试用）。
 8. 转盘回 90°（直接移动，不再回零）→ state=READY，message 带结果目录路径
 ```
 
@@ -167,8 +167,8 @@ state=PROCESSING
 ### 5.1 时间同步与逐点补偿
 
 - 角度日志：100Hz `(host_ros_time, pos)` 序列（扫描窗口内）。
-- Fairy 每点采集时刻：`t_p = frame_header.stamp + point.time`（`time` 为帧内相对偏移，秒；要求 Fairy 驱动 `timestamp_type` 配置为 host 时间基准，见 §10 集成验证项）。
-- 每点转角：`θ_p = interp(angle_log, t_p)`，线性插值；超出日志范围时钳位到最近端点。
+- Fairy 每点采集时刻：**帧首锚定** `t_origin = frame_header.stamp − frame_period`（period 由相邻帧 stamp 差的中位数在线估计，样本不足时取 0），每点 `t_p = t_origin + point.time`（`time` 为帧内相对首点的秒偏移；要求 Fairy 驱动 `timestamp_type` 配置为 host 时间基准，见 §10 集成验证项）。
+- 每点转角：`θ_raw_p = interp(angle_log, t_p)`，线性插值；超出日志范围时钳位到最近端点。
 - 角度换算：原始角度（绝对位置角）`θ_raw = (pos − 500) × 0.02`（恒为正，用于扫描窗口裁剪）；旋转方向角 `θ = angle_sign × θ_raw`（仅决定 Rz 方向）。**裁剪窗口 [30°, 150°] 作用于 θ_raw**，与 `angle_sign` 无关。
 
 ### 5.2 点云变换与输出
