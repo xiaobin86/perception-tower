@@ -1,7 +1,7 @@
 tower_node:
   ros__parameters:
     # 串口
-    serial_port: ""            # 空 = 不连接真实舵机（配合 mock_hardware，或仅测试订阅/拼合链路）
+    serial_port: /dev/tty.usbserial-14430
     serial_baud: 115200
     poll_hz: 100.0             # 扫描期间位置轮询频率
     pos_tol_deg: 0.1           # 到位容差

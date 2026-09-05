@@ -1,0 +1,9 @@
+<CycloneDDS>
+  <Domain>
+    <Discovery>
+      <Peers>
+        <Peer address="192.168.3.162"/>
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>
