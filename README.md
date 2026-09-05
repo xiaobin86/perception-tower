@@ -201,11 +201,15 @@ ros2 launch orbbec_camera gemini_330_series.launch.py
 #### 2.4 配置 DDS 网络发现
 
 ```bash
-# 加入 ~/.bashrc
+# 加入容器内 ~/.bashrc（Docker 容器内必须设置，否则跨机 DDS 发现不通）
 export ROS_DOMAIN_ID=0
 export ROS_LOCALHOST_ONLY=0
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI='<CycloneDDS><Domain><Discovery><Peers><Peer address="macOS机器IP"/></Peers></Discovery></Domain></CycloneDDS>'
 source /opt/ros/humble/setup.bash
 ```
+
+> **重要**：如果 ROS2 跑在 Docker 容器中（即使 `--network host`），容器内的传感器进程启动时必须带上 `CYCLONEDDS_URI`，否则远端机器无法发现 topic。最简单的做法是把上面的 export 写入容器的 `/root/.bashrc`。
 
 #### 2.5 一键安装脚本
 
@@ -259,8 +263,8 @@ ros2 topic list --no-daemon
 
 | 问题 | 解决 |
 |------|------|
-| `ros2 service list` 超时 | `kill $(pgrep -f ros2_daemon)` 或加 `--no-daemon` |
-| `ros2 topic list` 看不到远端 topic | 确认两台 `ROS_DOMAIN_ID=0`、`ROS_LOCALHOST_ONLY=0`，ping 通 |
+| `ros2 topic list` 看不到远端 topic | 确认两台 `ROS_DOMAIN_ID=0`、`ROS_LOCALHOST_ONLY=0`，ping 通。**如果传感器在 Docker 容器内，容器里的 DDS 进程也必须设 `CYCLONEDDS_URI` peer 指向远端机器，双向 peer 才能发现** |
+| `ros2 topic list` 超时 | `kill $(pgrep -f ros2_daemon)` 或加 `--no-daemon` |
 | `Package 'perception_tower' not found` | 执行 `colcon build --symlink-install --cmake-args -DPython_EXECUTABLE=$(which python)` |
 | `source install/setup.bash` 报错 | 改用 `source install/local_setup.bash` 或不 source，conda 激活脚本已自动配置 |
 | `rviz2` 找不到 | `conda install -c robostack-humble -c conda-forge ros-humble-desktop` |
