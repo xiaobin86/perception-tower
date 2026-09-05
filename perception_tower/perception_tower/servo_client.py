@@ -185,6 +185,13 @@ class ServoClient:
             if ev[0] in kinds:
                 return ev
 
+    def _flush_replies(self):
+        while True:
+            try:
+                self._reply_q.get_nowait()
+            except queue.Empty:
+                break
+
     def move_to(self, pos: int, time_ms: int):
         self._send(f"#{self._servo_id:03d}P{pos}T{time_ms}!".encode())
 
@@ -193,6 +200,7 @@ class ServoClient:
         self._wait_event(("ok",), 0.5)
 
     def read_position(self, timeout_s: float = 0.2) -> int:
+        self._flush_replies()
         self._send(f"#{self._servo_id:03d}PRAD!".encode())
         ev = self._wait_event(("pos",), timeout_s)
         return int(ev[1])

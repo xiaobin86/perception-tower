@@ -8,6 +8,7 @@ a synchronized pair for the 90-degree snapshot. ``save_photos`` requires
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
@@ -40,19 +41,23 @@ class CameraGrabber:
         self._max_pair_gap_s = max_pair_gap_s
         self._color: Optional[Tuple["Image", float]] = None
         self._depth: Optional[Tuple["Image", float]] = None
+        self._lock = threading.Lock()
 
     def on_color(self, msg: "Image"):
-        self._color = (msg, self._now())
+        with self._lock:
+            self._color = (msg, self._now())
 
     def on_depth(self, msg: "Image"):
-        self._depth = (msg, self._now())
+        with self._lock:
+            self._depth = (msg, self._now())
 
     def capture(self, timeout_s: float = 5.0) -> PhotoPair:
         deadline = self._now() + timeout_s
         poll_s = 0.02
         while self._now() < deadline:
-            c = self._color
-            d = self._depth
+            with self._lock:
+                c = self._color
+                d = self._depth
             now = self._now()
             if c is not None and d is not None:
                 if (now - c[1]) <= self._freshness_s and (now - d[1]) <= self._freshness_s:

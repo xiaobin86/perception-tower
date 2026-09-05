@@ -8,6 +8,7 @@ samples). The stitcher consumes these frames together with the angle log.
 
 from __future__ import annotations
 
+import threading
 from collections import deque
 
 import numpy as np
@@ -23,14 +24,17 @@ class FairyBuffer:
         self._frames: list = []
         self._stamps = deque(maxlen=history_max)
         self._history_max = history_max
+        self._lock = threading.Lock()
 
     def start(self):
-        self._capturing = True
-        self._frames = []
-        self._stamps.clear()
+        with self._lock:
+            self._capturing = True
+            self._frames = []
+            self._stamps.clear()
 
     def stop(self):
-        self._capturing = False
+        with self._lock:
+            self._capturing = False
 
     def _estimate_period(self) -> float:
         if len(self._stamps) < 3:
@@ -40,20 +44,23 @@ class FairyBuffer:
         return diffs[len(diffs) // 2]
 
     def on_cloud(self, msg, stamp_sec: float):
-        if not self._capturing:
-            return
-        xyz = read_xyz(msg)
-        if xyz.shape[0] == 0:
-            return
-        self._stamps.append(stamp_sec)
-        period = self._estimate_period()
-        time_origin = stamp_sec - period
-        point_time = read_time(msg) if self._use_time else None
-        intensity = read_intensity(msg)
-        self._frames.append(FairyFrame(stamp_sec, time_origin, xyz, point_time, intensity))
+        with self._lock:
+            if not self._capturing:
+                return
+            xyz = read_xyz(msg)
+            if xyz.shape[0] == 0:
+                return
+            self._stamps.append(stamp_sec)
+            period = self._estimate_period()
+            time_origin = stamp_sec - period
+            point_time = read_time(msg) if self._use_time else None
+            intensity = read_intensity(msg)
+            self._frames.append(FairyFrame(stamp_sec, time_origin, xyz, point_time, intensity))
 
     def frames(self) -> list:
-        return list(self._frames)
+        with self._lock:
+            return list(self._frames)
 
     def count(self) -> int:
-        return len(self._frames)
+        with self._lock:
+            return len(self._frames)

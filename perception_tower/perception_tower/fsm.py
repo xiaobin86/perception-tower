@@ -73,7 +73,7 @@ class TowerFSM:
     def _set_state(self, state: "State", progress: int = 0, message: str = ""):
         with self._lock:
             self._state = state
-        self._status_cb(state, progress, message)
+            self._status_cb(state, progress, message)
 
     def _busy_states(self):
         return {State.INITING, State.SCANNING, State.PROCESSING}
@@ -82,6 +82,9 @@ class TowerFSM:
         with self._lock:
             if self._state in self._busy_states():
                 return False, f"busy: {self._state.name}"
+            self._state = State.INITING
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
         self._thread = threading.Thread(target=self._run_init, daemon=True)
         self._thread.start()
         return True, "init started"
@@ -90,6 +93,9 @@ class TowerFSM:
         with self._lock:
             if self._state in self._busy_states():
                 return False, f"busy: {self._state.name}"
+            self._state = State.SCANNING
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
         self._thread = threading.Thread(target=self._run_scan, daemon=True)
         self._thread.start()
         return True, "scan started"
