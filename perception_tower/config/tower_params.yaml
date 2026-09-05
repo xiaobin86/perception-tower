@@ -1,0 +1,36 @@
+tower_node:
+  ros__parameters:
+    # 串口
+    serial_port: ""            # 空 = 不连接真实舵机（配合 mock_hardware，或仅测试订阅/拼合链路）
+    serial_baud: 115200
+    poll_hz: 100.0             # 扫描期间位置轮询频率
+    pos_tol_deg: 0.1           # 到位容差
+    pos_stable_count: 5        # 连续 N 次在容差内判到位
+    # 塔几何
+    pos_origin: 500            # 0° 对应位置
+    deg_per_pos: 0.02
+    angle_sign: 1              # +1: pos 增大 = 绕 +Z 逆时针
+    ready_deg: 90.0            # 复位/待命角度
+    scan_start_deg: 30.0
+    scan_end_deg: 150.0
+    sweep_speed_deg_s: 40.0    # 扫描角速度（决定 MOVE 的 T 参数）
+    home_timeout_s: 30.0       # RST 回零超时
+    # Fairy 拼合
+    fairy_topic: /fairy/points
+    fairy_time_field: true     # 逐点补偿开关（依赖驱动每点 time）
+    mount_rpy_deg: [90.0, 0.0, 0.0]
+    mount_offset_xyz: [0.0, 0.0, 0.0]
+    voxel_leaf_m: 0.01         # 0 = 关闭下采样
+    world_frame_id: world
+    # 相机
+    color_topic: /camera/color/image_raw
+    depth_topic: /camera/depth/image_raw
+    # 输出
+    output_dir: /tmp/perception_tower
+    save_cloud: true
+    # 输出话题
+    stitched_topic: /perception_tower/stitched_points
+    photo_color_topic: /perception_tower/photo_color
+    photo_depth_topic: /perception_tower/photo_depth
+    # 调试
+    mock_hardware: false       # true: FakeServo/FakeFairy/FakeCamera

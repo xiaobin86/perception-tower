@@ -1,6 +1,13 @@
-.DS_Store
 __pycache__/
 *.pyc
+*.egg-info/
 build/
 install/
 log/
+*.o
+*.so
+*.dylib
+build/
+.vscode/
+.idea/
+.obsidian/
