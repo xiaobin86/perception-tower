@@ -55,7 +55,7 @@ curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Mi
 bash Miniforge3-MacOSX-x86_64.sh
 ```
 
-#### 1.2 创建 conda 环境
+#### 1.2 创建并配置 conda 环境
 
 ```bash
 conda create -n tower -c robostack-humble -c conda-forge --override-channels \
@@ -70,13 +70,49 @@ conda create -n tower -c robostack-humble -c conda-forge --override-channels \
 
 conda activate tower
 pip install empy==3.3.4
+pip install cmake==3.28.3
 ```
 
-#### 1.3 配置环境变量
+> 注意：ROS2 Humble 与 cmake 4.x 不兼容，必须安装 cmake 3.28.x。homebrew 的 cmake 4.x 会导致 `Could NOT find Python` 错误。
 
-conda 激活时自动设置（已预置在 conda 环境中，无需手动操作）：
+配置 conda 自动激活脚本（只需执行一次）：
+
 ```bash
-# 以下变量在 conda activate tower 时自动生效：
+mkdir -p "$CONDA_PREFIX/etc/conda/activate.d" "$CONDA_PREFIX/etc/conda/deactivate.d"
+
+cat > "$CONDA_PREFIX/etc/conda/activate.d/env_vars.sh" <<'EOF'
+#!/bin/bash
+# Auto-configure environment when conda env 'tower' is activated.
+export PATH="$CONDA_PREFIX/bin:$PATH"
+if [ -z "${_TOWER_OLD_PATH+x}" ]; then
+    export _TOWER_OLD_PATH="$PATH"
+fi
+if [ -f "$CONDA_PREFIX/setup.bash" ]; then
+    pushd "$CONDA_PREFIX" > /dev/null
+    source setup.bash
+    popd > /dev/null
+fi
+EOF
+
+cat > "$CONDA_PREFIX/etc/conda/deactivate.d/env_vars.sh" <<'EOF'
+#!/bin/bash
+if [ -n "${_TOWER_OLD_PATH+x}" ]; then
+    export PATH="$_TOWER_OLD_PATH"
+    unset _TOWER_OLD_PATH
+fi
+EOF
+
+chmod +x "$CONDA_PREFIX/etc/conda/activate.d/env_vars.sh" "$CONDA_PREFIX/etc/conda/deactivate.d/env_vars.sh"
+```
+
+之后每次 `conda activate tower` 会自动：
+- 把 conda bin 放到 PATH 最前面（使用 cmake 3.28.3）
+- source ROS2 Humble setup
+
+#### 1.3 环境变量
+
+conda 激活时自动设置（无需手动操作）：
+```bash
 export ROS_DOMAIN_ID=0
 export ROS_LOCALHOST_ONLY=0
 ```
@@ -94,8 +130,9 @@ export PATH="$CONDA_PREFIX/bin:$PATH"
 git clone git@github.com:xiaobin86/perception-tower.git
 cd perception-tower
 
-# 编译（每次 clone 后必须执行一次）
-colcon build --symlink-install --cmake-args -DPython_EXECUTABLE=$(which python)
+# 编译
+rm -rf build install log
+colcon build --packages-select perception_tower_interfaces perception_tower_sensor_interfaces perception_tower
 ```
 
 > **注意**：如果 `colcon` 命令找不到，确保 `conda activate tower` 已执行。
@@ -293,7 +330,8 @@ ros2 topic list --no-daemon
 |------|------|
 | `ros2 topic list` 看不到远端 topic | 确认两台 `ROS_DOMAIN_ID=0`、`ROS_LOCALHOST_ONLY=0`，ping 通。**容器内 DDS 也必须设 `CYCLONEDDS_URI` peer 指向远端机器** |
 | `ros2 topic list` 超时 | `kill $(pgrep -f ros2_daemon)` 或加 `--no-daemon` |
-| `Package 'perception_tower' not found` | 执行 `colcon build --cmake-args -DPython_EXECUTABLE=$(which python)`（不要用 `--symlink-install`） |
+| `Package 'perception_tower' not found` | 执行 `colcon build --packages-select perception_tower_interfaces perception_tower_sensor_interfaces perception_tower` |
+| `Could NOT find Python` | conda env 中 `pip install cmake==3.28.3`，避免使用 homebrew cmake 4.x |
 | `source install/setup.bash` 报错 | 改用 `source install/local_setup.bash` 或不 source，conda 激活脚本已自动配置 |
 | `rviz2` 找不到 | `conda install -c robostack-humble -c conda-forge ros-humble-desktop` |
 | `ModuleNotFoundError: rclpy` | 确认 `conda activate tower`，不要用系统 Python |
