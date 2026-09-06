@@ -11,9 +11,7 @@ find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TowerStatus.msg"
-  "msg/TurntableStatus.msg"
   "srv/TowerCommand.srv"
-  "srv/TurntableCommand.srv"
   DEPENDENCIES std_msgs
 )
 

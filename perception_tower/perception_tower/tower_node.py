@@ -29,8 +29,10 @@ from .stitcher import StitchParams
 try:
     from builtin_interfaces.msg import Time
     from sensor_msgs.msg import Image, PointCloud2
-    from perception_tower_interfaces.msg import TowerStatus, TurntableStatus
-    from perception_tower_interfaces.srv import TowerCommand, TurntableCommand
+    from perception_tower_interfaces.msg import TowerStatus
+    from perception_tower_interfaces.srv import TowerCommand
+    from perception_tower_sensor_interfaces.msg import TurntableStatus
+    from perception_tower_sensor_interfaces.srv import TurntableCommand
 
     _ROS_AVAILABLE = True
 except Exception:  # pragma: no cover
@@ -135,10 +137,12 @@ class TowerNode(Node):
             read_position = self._mock_tt.read_position
         else:
             turntable_cmd = self._create_turntable_client()
+            from rclpy.qos import ReliabilityPolicy
+            tt_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
             self.create_subscription(
                 TurntableStatus,
                 self.get_parameter("turntable_status_topic").value,
-                self._on_turntable_status, 10)
+                self._on_turntable_status, tt_qos)
             read_position = self._read_position_from_logger
 
         camera = CameraGrabber(now_fn=lambda: self.get_clock().now().nanoseconds * 1e-9)
